@@ -1,88 +1,80 @@
 import os
+import uuid
 import numpy as np
 import chromadb
-from chromadb.config import Settings
-import uuid
-from typing import List, Dict, Any, Tuple
-from src.embedding import EmbeddingPipeline
+from typing import List, Dict, Any, Optional
+
 
 class CHROMAVectorStore:
-    def __init__(self, collection_name:str='legal_texts_pipeline', persistent_directory:str='./src/vectorStore', 
-                 embedding_model:str='Qwen/Qwen3-Embedding-8B', chunk_size: int = 800, chunk_overlap: int = 200):
-        self.collection_name=collection_name
-        self.persistent_directory=persistent_directory
-        self.client=None
-        self.collection=None
-        self.embedding_model= embedding_model
-        self.chunk_size=chunk_size
-        self.chunk_overlap =chunk_overlap
+    """
+    Vector Store is a SINK.
+    It does NOT chunk, preprocess, or embed.
+    It only stores worker outputs.
+    """
+
+    def __init__(
+        self,
+        collection_name: str = "legal_texts_pipeline",
+        persistent_directory: str = "./src/vectorStore",
+    ):
+        self.collection_name = collection_name
+        self.persistent_directory = persistent_directory
+        self.client = None
+        self.collection = None
         self._initialize_store()
 
     def _initialize_store(self):
-        print("Initialize ChromaDB client and collection")
+        print("[VectorStore] Initializing ChromaDB")
 
-        os.makedirs(name=self.persistent_directory, exist_ok=True)
-        ##Make a new client 
+        os.makedirs(self.persistent_directory, exist_ok=True)
         self.client = chromadb.PersistentClient(path=self.persistent_directory)
 
-        # Get or create collection
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
-            metadata={'Description': 'Basic embeddings for Legal Docs pipeline'}
+            metadata={"description": "Embeddings produced by parallel workers"},
         )
-        print(f"Vector store initialized. Collection: {self.collection_name}")
-        print(f"Existing documents in collection: {self.collection.count()}")
-    
+
+        print(f"[VectorStore] Collection: {self.collection_name}")
+        print(f"[VectorStore] Existing items: {self.collection.count()}")
+
     def load(self):
-        print(f"Vector store loaded. Collection: {self.collection_name}")
-        print(f'Existing documents in collection {self.collection.count()}')
+        print(f"[VectorStore] Loaded collection: {self.collection_name}")
+        print(f"[VectorStore] Existing items: {self.collection.count()}")
 
-    def load_and_add_docs(self, documents: list[Any]):
-        emb_pipe = EmbeddingPipeline(model_name=self.embedding_model, chunk_size=self.chunk_size, chunk_overlap=self.chunk_overlap)
-        chunks = emb_pipe.chunk_documents(documents)
-        texts = [text.page_content for text in chunks]
-        embeddings = emb_pipe.generate_embeddings(texts)
-        self.add_documents(documents=chunks, embeddings=embeddings)
+    def add_embeddings(
+        self,
+        texts: List[str],
+        embeddings: np.ndarray,
+        metadatas: List[Dict[str, Any]],
+        ids: Optional[List[str]] = None,
+    ):
+        """
+        Called by:
+        - Workers directly
+        - OR Aggregator
 
-    def add_documents(self, documents: list[Any], embeddings: np.ndarray):
-        print(f'Adding documents and embeddings in {self.collection_name}')
+        All lists must be the same length.
+        """
 
-        if(len(documents) != len(embeddings)):
-            raise ValueError("Document must match the size of embeddings")
-        
-        ids=[]
-        metadatas=[]
-        document_texts= []
-        embedding_list=[]
+        if len(texts) != len(embeddings) or len(texts) != len(metadatas):
+            raise ValueError("texts, embeddings, and metadata length mismatch")
 
-        for i, (doc, embedding) in enumerate(zip(documents, embeddings)):
-            # Generate a unique ID
-            doc_id = f"doc_{uuid.uuid4().hex[:8]}_{i}"
-            ids.append(doc_id)
+        if ids is None:
+            ids = [f"chunk_{uuid.uuid4().hex}" for _ in texts]
 
-            # Prepare Metadata
-            metadata = dict(doc.metadata)
-            metadata['doc_index'] = i
-            metadata['content_length'] = len(doc.page_content)
-            metadatas.append(metadata)
+        print(f"[VectorStore] Inserting {len(texts)} embeddings")
 
-             # Document content
-            document_texts.append(doc.page_content)
-
-            # Embedding
-            embedding_list.append(embedding)
-
-        # Add to collection
         try:
             self.collection.add(
                 ids=ids,
-                embeddings=embedding_list,
-                documents=document_texts,
-                metadatas=metadatas
+                documents=texts,
+                embeddings=embeddings.tolist(),
+                metadatas=metadatas,
             )
 
-            print(f"Successfully added {len(documents)} to vector store")
-            print(f'Existing documents in collection {self.collection.count()}')
+            print(f"[VectorStore] Insert success")
+            print(f"[VectorStore] Total items: {self.collection.count()}")
+
         except Exception as e:
-            print(f'Error adding documents to vector store {e}')
+            print(f"[VectorStore] Insert failed: {e}")
             raise
